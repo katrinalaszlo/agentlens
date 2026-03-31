@@ -1,4 +1,4 @@
-import { readdir, readFile } from "fs/promises";
+import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
 import chalk from "chalk";
 import { getClaudeProjectsDir } from "../utils/paths.js";
@@ -14,78 +14,272 @@ import {
   warning,
 } from "../utils/display.js";
 
+// Anthropic pricing per million tokens (as of May 2025)
+const MODEL_PRICING: Record<
+  string,
+  { input: number; output: number; cacheRead: number; cacheWrite: number }
+> = {
+  "claude-opus-4-6": {
+    input: 15,
+    output: 75,
+    cacheRead: 1.5,
+    cacheWrite: 18.75,
+  },
+  "claude-sonnet-4-6": {
+    input: 3,
+    output: 15,
+    cacheRead: 0.3,
+    cacheWrite: 3.75,
+  },
+  "claude-haiku-4-5-20251001": {
+    input: 0.8,
+    output: 4,
+    cacheRead: 0.08,
+    cacheWrite: 1,
+  },
+  // Older models that may appear in history
+  "claude-sonnet-4-5-20250514": {
+    input: 3,
+    output: 15,
+    cacheRead: 0.3,
+    cacheWrite: 3.75,
+  },
+};
+
+const DEFAULT_PRICING = {
+  input: 3,
+  output: 15,
+  cacheRead: 0.3,
+  cacheWrite: 3.75,
+};
+
+type ModelUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  costUSD: number;
+};
+
 type ProjectCostData = {
   project: string;
+  sessions: number;
   totalCost: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
-  webSearchRequests: number;
-  linesAdded: number;
-  linesRemoved: number;
-  apiDuration: number;
-  wallDuration: number;
-  modelUsage: Record<
-    string,
-    {
-      inputTokens: number;
-      outputTokens: number;
-      cacheReadInputTokens: number;
-      cacheCreationInputTokens: number;
-      costUSD: number;
-      webSearchRequests: number;
-    }
-  >;
+  modelUsage: Record<string, ModelUsage>;
 };
 
-async function readProjectConfigs(): Promise<ProjectCostData[]> {
+const unknownModels = new Set<string>();
+
+function getPricing(model: string) {
+  if (MODEL_PRICING[model]) return MODEL_PRICING[model];
+  if (model.includes("opus")) return MODEL_PRICING["claude-opus-4-6"];
+  if (model.includes("sonnet")) return MODEL_PRICING["claude-sonnet-4-6"];
+  if (model.includes("haiku"))
+    return MODEL_PRICING["claude-haiku-4-5-20251001"];
+  unknownModels.add(model);
+  return DEFAULT_PRICING;
+}
+
+function estimateCost(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens: number,
+  cacheCreationTokens: number,
+): number {
+  const pricing = getPricing(model);
+  return (
+    (inputTokens * pricing.input +
+      outputTokens * pricing.output +
+      cacheReadTokens * pricing.cacheRead +
+      cacheCreationTokens * pricing.cacheWrite) /
+    1_000_000
+  );
+}
+
+async function readProjectCosts(): Promise<ProjectCostData[]> {
   const projectsDir = getClaudeProjectsDir();
   const results: ProjectCostData[] = [];
 
   let projectDirs: string[];
   try {
     projectDirs = await readdir(projectsDir);
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      console.error(`agentlens: could not read ${projectsDir}: ${err}`);
+    }
     return [];
   }
 
   for (const projDir of projectDirs) {
-    const configPath = join(projectsDir, projDir, ".config.json");
+    const projPath = join(projectsDir, projDir);
     try {
-      const raw = await readFile(configPath, "utf-8");
-      const config = JSON.parse(raw);
-      if (!config.lastCost && !config.lastTotalInputTokens) continue;
-
-      results.push({
-        project: projDir.replace(/-/g, "/"),
-        totalCost: config.lastCost || 0,
-        inputTokens: config.lastTotalInputTokens || 0,
-        outputTokens: config.lastTotalOutputTokens || 0,
-        cacheReadTokens: config.lastTotalCacheReadInputTokens || 0,
-        cacheCreationTokens: config.lastTotalCacheCreationInputTokens || 0,
-        webSearchRequests: config.lastTotalWebSearchRequests || 0,
-        linesAdded: config.lastLinesAdded || 0,
-        linesRemoved: config.lastLinesRemoved || 0,
-        apiDuration: config.lastAPIDuration || 0,
-        wallDuration: config.lastDuration || 0,
-        modelUsage: config.lastModelUsage || {},
-      });
-    } catch {
+      const stats = await stat(projPath);
+      if (!stats.isDirectory()) continue;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        console.error(`agentlens: could not stat ${projDir}: ${err}`);
+      }
       continue;
     }
+
+    let files: string[];
+    try {
+      files = await readdir(projPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        console.error(`agentlens: could not read ${projDir}: ${err}`);
+      }
+      continue;
+    }
+
+    const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+    if (jsonlFiles.length === 0) continue;
+
+    const modelUsage: Record<string, ModelUsage> = {};
+    let totalInput = 0;
+    let totalOutput = 0;
+    let totalCacheRead = 0;
+    let totalCacheCreation = 0;
+    let totalCost = 0;
+
+    let unreadableFiles = 0;
+    for (const file of jsonlFiles) {
+      const filePath = join(projPath, file);
+      let content: string;
+      try {
+        content = await readFile(filePath, "utf-8");
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        console.error(`agentlens: could not read ${file}: ${code || err}`);
+        unreadableFiles++;
+        continue;
+      }
+
+      const lines = content.split("\n").filter((l) => l.trim());
+      let parseErrors = 0;
+
+      // Deduplicate by message ID — streaming chunks repeat usage data.
+      // Keep the last entry per message ID (has final output token count).
+      const lastUsageByMsg = new Map<
+        string,
+        { model: string; usage: Record<string, unknown> }
+      >();
+      let anonCounter = 0;
+
+      for (const line of lines) {
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          parseErrors++;
+          continue;
+        }
+
+        const msg = parsed.message as
+          | {
+              id?: string;
+              usage?: Record<string, unknown>;
+              model?: string;
+            }
+          | undefined;
+        const usage = msg?.usage;
+        if (!usage) continue;
+
+        const msgId = msg?.id ?? `anon-${anonCounter++}`;
+        lastUsageByMsg.set(msgId, {
+          model: msg?.model || "unknown",
+          usage,
+        });
+      }
+
+      for (const [, { model, usage }] of lastUsageByMsg) {
+        const input = Number(usage.input_tokens) || 0;
+        const output = Number(usage.output_tokens) || 0;
+        const cacheRead = Number(usage.cache_read_input_tokens) || 0;
+        const cacheCreation = Number(usage.cache_creation_input_tokens) || 0;
+
+        totalInput += input;
+        totalOutput += output;
+        totalCacheRead += cacheRead;
+        totalCacheCreation += cacheCreation;
+
+        if (!modelUsage[model]) {
+          modelUsage[model] = {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            costUSD: 0,
+          };
+        }
+        modelUsage[model].inputTokens += input;
+        modelUsage[model].outputTokens += output;
+        modelUsage[model].cacheReadInputTokens += cacheRead;
+        modelUsage[model].cacheCreationInputTokens += cacheCreation;
+
+        const msgCost = estimateCost(
+          model,
+          input,
+          output,
+          cacheRead,
+          cacheCreation,
+        );
+        modelUsage[model].costUSD += msgCost;
+        totalCost += msgCost;
+      }
+
+      if (
+        parseErrors > 0 &&
+        (parseErrors === lines.length || parseErrors > 5)
+      ) {
+        const pct = ((parseErrors / lines.length) * 100).toFixed(0);
+        console.error(
+          `agentlens: ${file} — ${parseErrors}/${lines.length} lines failed to parse (${pct}%)`,
+        );
+      }
+    }
+
+    if (unreadableFiles > 0) {
+      console.error(
+        `agentlens: ${projDir} — ${unreadableFiles} session file(s) could not be read`,
+      );
+    }
+
+    if (totalInput === 0 && totalOutput === 0) continue;
+
+    results.push({
+      project: projDir.replace(/-/g, "/"),
+      sessions: jsonlFiles.length,
+      totalCost,
+      inputTokens: totalInput,
+      outputTokens: totalOutput,
+      cacheReadTokens: totalCacheRead,
+      cacheCreationTokens: totalCacheCreation,
+      modelUsage,
+    });
   }
   return results;
 }
 
 export async function scanCosts(): Promise<string> {
+  unknownModels.clear();
   const output: string[] = [];
   output.push(header("COSTS — Token Usage & Spend Breakdown"));
 
-  const projects = await readProjectConfigs();
+  const projects = await readProjectCosts();
 
   if (projects.length === 0) {
-    output.push("  No cost data found. Run Claude Code first.");
+    output.push(
+      "  No cost data found. No session transcripts with usage data.",
+    );
     return output.join("\n");
   }
 
@@ -98,27 +292,25 @@ export async function scanCosts(): Promise<string> {
     (a, p) => a + p.cacheCreationTokens,
     0,
   );
-  const totalWebSearch = projects.reduce((a, p) => a + p.webSearchRequests, 0);
-  const totalLinesAdded = projects.reduce((a, p) => a + p.linesAdded, 0);
-  const totalLinesRemoved = projects.reduce((a, p) => a + p.linesRemoved, 0);
+  const totalSessions = projects.reduce((a, p) => a + p.sessions, 0);
 
-  output.push(subheader("Aggregate (Last Session Per Project)"));
+  output.push(subheader("Aggregate (All Sessions)"));
   output.push(
     table([
-      ["Total spend", costFmt(totalCost)],
+      ["Estimated spend", costFmt(totalCost)],
       ["Input tokens", formatNumber(totalInput)],
       ["Output tokens", formatNumber(totalOutput)],
       ["Cache read tokens", formatNumber(totalCacheRead)],
       ["Cache write tokens", formatNumber(totalCacheWrite)],
-      ["Web search requests", String(totalWebSearch)],
-      ["Code changes", `+${totalLinesAdded} / -${totalLinesRemoved} lines`],
+      ["Sessions", String(totalSessions)],
       ["Projects", String(projects.length)],
     ]),
   );
 
-  // Cache efficiency
-  if (totalInput > 0) {
-    const cacheHitRate = (totalCacheRead / (totalInput + totalCacheRead)) * 100;
+  // Cache efficiency: reads as fraction of all cached tokens (reads + writes)
+  const totalCacheable = totalCacheRead + totalCacheWrite;
+  if (totalCacheable > 0) {
+    const cacheHitRate = (totalCacheRead / totalCacheable) * 100;
     output.push(subheader("Cache Efficiency"));
     output.push(item("Cache hit rate", `${cacheHitRate.toFixed(1)}%`));
     if (cacheHitRate < 30) {
@@ -159,16 +351,6 @@ export async function scanCosts(): Promise<string> {
         `    ${chalk.dim(`${formatNumber(usage.input)} in / ${formatNumber(usage.output)} out / ${formatNumber(usage.cacheRead)} cache`)}`,
       );
     }
-
-    // Multi-model note
-    const modelNames = Object.keys(modelTotals);
-    if (modelNames.length > 1) {
-      output.push(divider());
-      output.push(subheader("Multi-Model Usage"));
-      output.push(
-        info(`${modelNames.length} different models used across sessions.`),
-      );
-    }
   }
 
   // Per-project breakdown
@@ -177,17 +359,11 @@ export async function scanCosts(): Promise<string> {
   const sortedProjects = projects.sort((a, b) => b.totalCost - a.totalCost);
   for (const proj of sortedProjects.slice(0, 15)) {
     output.push(
-      `  ${costFmt(proj.totalCost)}  ${chalk.white(truncatePath(proj.project))}`,
+      `  ${costFmt(proj.totalCost)}  ${chalk.white(truncatePath(proj.project))} ${chalk.dim(`(${proj.sessions} sessions)`)}`,
     );
     output.push(
-      `    ${chalk.dim(`+${proj.linesAdded}/-${proj.linesRemoved} lines · ${formatNumber(proj.inputTokens + proj.outputTokens)} tokens`)}`,
+      `    ${chalk.dim(`${formatNumber(proj.inputTokens + proj.outputTokens)} tokens · ${formatNumber(proj.cacheReadTokens)} cache reads`)}`,
     );
-    if (proj.wallDuration > 0) {
-      const costPerHour = proj.totalCost / (proj.wallDuration / 3600000);
-      output.push(
-        `    ${chalk.dim(`Wall time: ${formatDuration(proj.wallDuration)} · ${costFmt(costPerHour)}/hr`)}`,
-      );
-    }
   }
   if (sortedProjects.length > 15) {
     output.push(
@@ -195,22 +371,33 @@ export async function scanCosts(): Promise<string> {
     );
   }
 
+  output.push(divider());
+  if (unknownModels.size > 0) {
+    const models = [...unknownModels].filter(
+      (m) => m !== "<synthetic>" && m !== "unknown",
+    );
+    if (models.length > 0) {
+      output.push(
+        warning(
+          `Default pricing used for unrecognized model(s): ${models.join(", ")}. Costs may be inaccurate.`,
+        ),
+      );
+    }
+  }
+  output.push(
+    info(
+      "Costs are estimates based on published Anthropic pricing. Actual billing may differ.",
+    ),
+  );
+
   return output.join("\n");
 }
 
 function formatNumber(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
-}
-
-function formatDuration(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  if (hours > 0) return `${hours}h ${minutes % 60}m`;
-  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
-  return `${seconds}s`;
 }
 
 function truncatePath(p: string): string {
