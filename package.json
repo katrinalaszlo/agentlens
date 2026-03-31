@@ -10,6 +10,7 @@
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
+    "prepare": "tsc",
     "prepublishOnly": "tsc"
   },
   "keywords": [
