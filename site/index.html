@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>agentlens - See what your AI coding agents are really doing</title>
+  <meta name="description" content="Scan your local machine for hidden AI agent behavior: costs, memory files, feature flags, background processes, and telemetry.">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0a0a0b;
+      --surface: #111113;
+      --surface-2: #18181b;
+      --border: #27272a;
+      --border-subtle: #1e1e21;
+      --text: #fafafa;
+      --text-secondary: #a1a1aa;
+      --text-muted: #71717a;
+      --cyan: #22d3ee;
+      --cyan-dim: #0e7490;
+      --cyan-glow: rgba(34, 211, 238, 0.12);
+      --blue: #3b82f6;
+      --green: #4ade80;
+      --yellow: #facc15;
+      --red: #f87171;
+      --purple: #a78bfa;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
+      --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Helvetica, Arial, sans-serif;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* ── Layout ── */
+    .container {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* ── Nav ── */
+    nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      background: rgba(10, 10, 11, 0.8);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    nav .container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 56px;
+    }
+
+    .logo {
+      font-family: var(--mono);
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text);
+      text-decoration: none;
+      letter-spacing: -0.02em;
+    }
+
+    .logo span { color: var(--cyan); }
+
+    .nav-links {
+      display: flex;
+      gap: 28px;
+      align-items: center;
+      list-style: none;
+    }
+
+    .nav-links a {
+      font-size: 13px;
+      color: var(--text-secondary);
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+
+    .nav-links a:hover { color: var(--text); }
+
+    .nav-gh {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .nav-gh svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      padding: 160px 0 100px;
+      text-align: center;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 14px 5px 10px;
+      background: var(--cyan-glow);
+      border: 1px solid rgba(34, 211, 238, 0.2);
+      border-radius: 100px;
+      font-size: 12px;
+      font-family: var(--mono);
+      color: var(--cyan);
+      margin-bottom: 32px;
+      letter-spacing: 0.02em;
+    }
+
+    .hero-badge-dot {
+      width: 6px;
+      height: 6px;
+      background: var(--cyan);
+      border-radius: 50%;
+      animation: pulse-dot 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .hero h1 {
+      font-size: clamp(36px, 5.5vw, 60px);
+      font-weight: 700;
+      line-height: 1.1;
+      letter-spacing: -0.035em;
+      max-width: 720px;
+      margin: 0 auto 24px;
+    }
+
+    .hero h1 em {
+      font-style: normal;
+      background: linear-gradient(135deg, var(--cyan), var(--blue));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .hero-sub {
+      font-size: 17px;
+      color: var(--text-secondary);
+      max-width: 520px;
+      margin: 0 auto 48px;
+      line-height: 1.7;
+    }
+
+    .cta-block {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .cta-cmd {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 24px;
+      font-family: var(--mono);
+      font-size: 15px;
+      color: var(--text);
+      cursor: default;
+      transition: border-color 0.2s;
+    }
+
+    .cta-cmd:hover { border-color: var(--cyan-dim); }
+
+    .cta-cmd .prompt { color: var(--cyan); user-select: none; }
+    .cta-cmd .cmd { color: var(--text-secondary); }
+    .cta-cmd .arg { color: var(--text); }
+
+    .cta-hint {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* ── Section titles ── */
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--cyan);
+      margin-bottom: 12px;
+    }
+
+    .section-title {
+      font-size: clamp(24px, 3.5vw, 36px);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 16px;
+    }
+
+    .section-desc {
+      font-size: 16px;
+      color: var(--text-secondary);
+      max-width: 560px;
+      line-height: 1.7;
+    }
+
+    /* ── Findings grid ── */
+    .findings {
+      padding: 80px 0;
+    }
+
+    .findings-header {
+      margin-bottom: 48px;
+    }
+
+    .findings-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px;
+      transition: border-color 0.2s, transform 0.2s;
+    }
+
+    .card:hover {
+      border-color: var(--border);
+      transform: translateY(-2px);
+    }
+
+    .card-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      margin-bottom: 16px;
+      font-family: var(--mono);
+      font-weight: 700;
+    }
+
+    .card-icon.cyan    { background: rgba(34, 211, 238, 0.1); color: var(--cyan); border: 1px solid rgba(34, 211, 238, 0.15); }
+    .card-icon.yellow  { background: rgba(250, 204, 21, 0.1); color: var(--yellow); border: 1px solid rgba(250, 204, 21, 0.15); }
+    .card-icon.blue    { background: rgba(59, 130, 246, 0.1); color: var(--blue); border: 1px solid rgba(59, 130, 246, 0.15); }
+    .card-icon.purple  { background: rgba(167, 139, 250, 0.1); color: var(--purple); border: 1px solid rgba(167, 139, 250, 0.15); }
+    .card-icon.red     { background: rgba(248, 113, 113, 0.1); color: var(--red); border: 1px solid rgba(248, 113, 113, 0.15); }
+
+    .card h3 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      letter-spacing: -0.01em;
+    }
+
+    .card-tag {
+      font-family: var(--mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 4px;
+    }
+
+    .card p {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.65;
+    }
+
+    /* ── Terminal mockup ── */
+    .terminal-section {
+      padding: 80px 0;
+    }
+
+    .terminal-section .section-header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+
+    .terminal-section .section-desc {
+      margin: 0 auto;
+    }
+
+    .terminal {
+      background: #0c0c0e;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      max-width: 720px;
+      margin: 0 auto;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.75;
+    }
+
+    .terminal-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .terminal-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--border);
+    }
+
+    .terminal-dot:nth-child(1) { background: #ff5f57; }
+    .terminal-dot:nth-child(2) { background: #febc2e; }
+    .terminal-dot:nth-child(3) { background: #28c840; }
+
+    .terminal-title {
+      flex: 1;
+      text-align: center;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .terminal-body {
+      padding: 20px 24px;
+      overflow-x: auto;
+    }
+
+    .terminal-body .line { white-space: pre; }
+    .t-prompt { color: var(--cyan); }
+    .t-cmd { color: var(--text); }
+    .t-dim { color: var(--text-muted); }
+    .t-green { color: var(--green); }
+    .t-yellow { color: var(--yellow); }
+    .t-red { color: var(--red); }
+    .t-cyan { color: var(--cyan); }
+    .t-blue { color: var(--blue); }
+    .t-purple { color: var(--purple); }
+    .t-bold { font-weight: 600; }
+    .t-head { color: var(--text); font-weight: 700; }
+
+    /* ── Why section ── */
+    .why {
+      padding: 80px 0;
+    }
+
+    .why-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      align-items: start;
+      margin-top: 48px;
+    }
+
+    .why-text h3 {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      letter-spacing: -0.02em;
+    }
+
+    .why-text p {
+      font-size: 15px;
+      color: var(--text-secondary);
+      line-height: 1.75;
+      margin-bottom: 16px;
+    }
+
+    .why-list {
+      list-style: none;
+      margin-top: 24px;
+    }
+
+    .why-list li {
+      position: relative;
+      padding-left: 20px;
+      margin-bottom: 10px;
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    .why-list li::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 9px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--cyan-dim);
+    }
+
+    .why-aside {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px;
+    }
+
+    .why-aside h4 {
+      font-family: var(--mono);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--yellow);
+      margin-bottom: 16px;
+    }
+
+    .why-aside p {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.7;
+      margin-bottom: 12px;
+    }
+
+    .why-aside code {
+      font-family: var(--mono);
+      font-size: 12px;
+      background: rgba(34, 211, 238, 0.08);
+      color: var(--cyan);
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+
+    /* ── Install section ── */
+    .install {
+      padding: 80px 0;
+      text-align: center;
+    }
+
+    .install-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 48px;
+      max-width: 560px;
+      margin: 0 auto;
+    }
+
+    .install-box h2 {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 8px;
+    }
+
+    .install-box .section-desc {
+      margin: 0 auto 32px;
+    }
+
+    .install-cmds {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      text-align: left;
+    }
+
+    .install-line {
+      font-family: var(--mono);
+      font-size: 13px;
+      background: var(--bg);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 12px 16px;
+      color: var(--text-secondary);
+    }
+
+    .install-line .prompt { color: var(--cyan); }
+    .install-line .flag { color: var(--text-muted); }
+
+    .install-or {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin: 4px 0;
+      text-align: center;
+    }
+
+    .gh-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 24px;
+      padding: 10px 20px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-size: 13px;
+      transition: border-color 0.2s, color 0.2s;
+    }
+
+    .gh-link:hover {
+      border-color: var(--text-muted);
+      color: var(--text);
+    }
+
+    .gh-link svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
+    }
+
+    /* ── Divider ── */
+    .divider {
+      height: 1px;
+      background: var(--border-subtle);
+      max-width: 1080px;
+      margin: 0 auto;
+    }
+
+    /* ── Footer ── */
+    footer {
+      padding: 40px 0;
+    }
+
+    footer .container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .footer-left {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .footer-left a {
+      color: var(--text-secondary);
+      text-decoration: none;
+    }
+
+    .footer-right {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: var(--mono);
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      .hero { padding: 120px 0 64px; }
+      .findings-grid { grid-template-columns: 1fr; }
+      .why-grid { grid-template-columns: 1fr; gap: 32px; }
+      .nav-links { gap: 16px; }
+      .terminal-body { font-size: 11px; padding: 16px; }
+      .install-box { padding: 32px 24px; }
+      footer .container { flex-direction: column; gap: 8px; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Nav -->
+  <nav>
+    <div class="container">
+      <a href="#" class="logo"><span>&gt;</span> agentlens</a>
+      <ul class="nav-links">
+        <li><a href="#findings">Findings</a></li>
+        <li><a href="#why">Why</a></li>
+        <li><a href="#install">Install</a></li>
+        <li>
+          <a href="https://github.com/katrinalaszlo/agentlens" class="nav-gh" target="_blank" rel="noopener">
+            <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            GitHub
+          </a>
+        </li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-badge">
+        <span class="hero-badge-dot"></span>
+        Currently scanning Claude Code
+      </div>
+      <h1>See what your AI coding agents are <em>really doing.</em></h1>
+      <p class="hero-sub">
+        Scan your local machine for hidden behavior&mdash;costs, memory files,
+        background agents, feature flags, and telemetry&mdash;in seconds.
+      </p>
+      <div class="cta-block">
+        <div class="cta-cmd">
+          <span class="prompt">$</span>
+          <span class="cmd">npx</span>
+          <span class="arg">agentlens scan</span>
+        </div>
+        <span class="cta-hint">No install needed. Runs locally. Nothing leaves your machine.</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="divider"></div>
+
+  <!-- Key Findings -->
+  <section class="findings" id="findings">
+    <div class="container">
+      <div class="findings-header">
+        <p class="section-label">What it finds</p>
+        <h2 class="section-title">Five layers of hidden behavior</h2>
+        <p class="section-desc">
+          AI coding agents store data across your filesystem. agentlens surfaces
+          what they don't show you in the UI.
+        </p>
+      </div>
+
+      <div class="findings-grid">
+        <div class="card">
+          <div class="card-icon cyan">M</div>
+          <p class="card-tag" style="color: var(--cyan)">Memory</p>
+          <h3>What Claude remembers about you</h3>
+          <p>
+            Persistent memory files stored in <code style="font-family: var(--mono); font-size: 12px; color: var(--cyan);">CLAUDE.md</code>
+            across your projects and global config. See exactly what context
+            follows you between sessions.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon yellow">$</div>
+          <p class="card-tag" style="color: var(--yellow)">Costs</p>
+          <h3>Hidden token spend from background models</h3>
+          <p>
+            Background processes&mdash;advisor models, dreaming, classifiers,
+            anti-distillation checks&mdash;consume tokens you never see on
+            your bill breakdown.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon blue">F</div>
+          <p class="card-tag" style="color: var(--blue)">Features</p>
+          <h3>Remote feature flags on your account</h3>
+          <p>
+            Server-side flags control which capabilities are enabled for
+            your session. See what's toggled on, what's off, and what's
+            being A/B tested.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon purple">S</div>
+          <p class="card-tag" style="color: var(--purple)">Sessions</p>
+          <h3>Background agent activity</h3>
+          <p>
+            Advisor models, dreaming processes, and memory extraction
+            run alongside your main session. See every background agent
+            and what it accessed.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon red">P</div>
+          <p class="card-tag" style="color: var(--red)">Privacy</p>
+          <h3>Data footprint and remote control surface</h3>
+          <p>
+            Full inventory of local data, remote endpoints contacted,
+            and the control surface available to the agent vendor
+            over your development environment.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="divider"></div>
+
+  <!-- Terminal -->
+  <section class="terminal-section">
+    <div class="container">
+      <div class="section-header">
+        <p class="section-label">Sample output</p>
+        <h2 class="section-title">What a scan looks like</h2>
+        <p class="section-desc">
+          One command. A full picture of what's running on your machine.
+        </p>
+      </div>
+
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span class="terminal-dot"></span>
+          <span class="terminal-dot"></span>
+          <span class="terminal-dot"></span>
+          <span class="terminal-title">Terminal</span>
+          <span></span>
+        </div>
+        <div class="terminal-body">
+<div class="line"><span class="t-prompt">$</span> <span class="t-cmd">npx agentlens scan</span></div>
+<div class="line"></div>
+<div class="line"><span class="t-cyan t-bold">agentlens</span> <span class="t-dim">v0.2.0</span></div>
+<div class="line"><span class="t-dim">Scanning for AI agent artifacts...</span></div>
+<div class="line"></div>
+<div class="line"><span class="t-head">MEMORY</span></div>
+<div class="line"><span class="t-green">  Found</span>  <span class="t-dim">~/.claude/CLAUDE.md</span>              <span class="t-yellow">2.4 KB</span></div>
+<div class="line"><span class="t-green">  Found</span>  <span class="t-dim">~/projects/app/CLAUDE.md</span>          <span class="t-yellow">1.1 KB</span></div>
+<div class="line"><span class="t-green">  Found</span>  <span class="t-dim">~/.claude/memory/</span>                 <span class="t-yellow">14 entries</span></div>
+<div class="line"></div>
+<div class="line"><span class="t-head">COSTS</span></div>
+<div class="line"><span class="t-yellow">  Warn</span>   <span class="t-dim">Background model calls detected</span></div>
+<div class="line"><span class="t-dim">         advisor_model:</span>       <span class="t-red">847 calls</span>  <span class="t-dim">~$12.40</span></div>
+<div class="line"><span class="t-dim">         dreaming:</span>             <span class="t-red">23 calls</span>   <span class="t-dim">~$3.80</span></div>
+<div class="line"><span class="t-dim">         classifier:</span>           <span class="t-dim">1,204 calls</span> <span class="t-dim">~$0.90</span></div>
+<div class="line"></div>
+<div class="line"><span class="t-head">FEATURES</span></div>
+<div class="line"><span class="t-green">  On</span>     <span class="t-dim">extended_thinking</span>          <span class="t-blue">server</span></div>
+<div class="line"><span class="t-green">  On</span>     <span class="t-dim">memory_extraction</span>          <span class="t-blue">server</span></div>
+<div class="line"><span class="t-red">  Off</span>    <span class="t-dim">code_execution_sandbox</span>     <span class="t-blue">server</span></div>
+<div class="line"><span class="t-yellow">  A/B</span>    <span class="t-dim">anti_distillation_v2</span>       <span class="t-purple">experiment</span></div>
+<div class="line"></div>
+<div class="line"><span class="t-head">SESSIONS</span></div>
+<div class="line"><span class="t-dim">  Active background agents:</span>    <span class="t-yellow">3</span></div>
+<div class="line"><span class="t-dim">  Total sessions (30d):</span>        <span class="t-dim">142</span></div>
+<div class="line"><span class="t-dim">  Memory extractions:</span>          <span class="t-dim">38</span></div>
+<div class="line"></div>
+<div class="line"><span class="t-head">PRIVACY</span></div>
+<div class="line"><span class="t-dim">  Local data footprint:</span>        <span class="t-yellow">48.2 MB</span></div>
+<div class="line"><span class="t-dim">  Remote endpoints:</span>            <span class="t-dim">4 unique hosts</span></div>
+<div class="line"><span class="t-dim">  Telemetry enabled:</span>           <span class="t-red">yes</span></div>
+<div class="line"></div>
+<div class="line"><span class="t-cyan">Scan complete.</span> <span class="t-dim">Run</span> <span class="t-cmd">agentlens report</span> <span class="t-dim">for full details.</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="divider"></div>
+
+  <!-- Why -->
+  <section class="why" id="why">
+    <div class="container">
+      <p class="section-label">Why this exists</p>
+      <h2 class="section-title">Your AI agent is doing more than you think</h2>
+
+      <div class="why-grid">
+        <div class="why-text">
+          <p>
+            AI coding agents don't just respond to your prompts. Behind every
+            session, background processes run silently: advisor models that
+            pre-screen your requests, "dreaming" processes that reorganize
+            context, classifiers that categorize your work, and anti-distillation
+            checks that protect model weights.
+          </p>
+          <p>
+            These background agents consume tokens, write persistent memory
+            files, and phone home to remote servers&mdash;all without surfacing
+            in your session UI. Your bill says one thing; reality is another.
+          </p>
+          <p>
+            agentlens exists because developers deserve to see what's running
+            on their machines. No judgment, no drama&mdash;just visibility.
+          </p>
+          <ul class="why-list">
+            <li>100% local&mdash;nothing leaves your machine</li>
+            <li>Read-only&mdash;never modifies agent data</li>
+            <li>Open source under MIT license</li>
+            <li>Currently supports Claude Code, more agents coming</li>
+          </ul>
+        </div>
+
+        <div class="why-aside">
+          <h4>What are background agents?</h4>
+          <p>
+            When you start a coding session, the AI agent may spawn additional
+            model calls you never asked for:
+          </p>
+          <p>
+            <code>advisor</code> &mdash; A secondary model that evaluates your
+            prompt before the primary model sees it.
+          </p>
+          <p>
+            <code>dreaming</code> &mdash; An offline process that consolidates
+            session context into long-term memory.
+          </p>
+          <p>
+            <code>classifier</code> &mdash; Lightweight models that tag and
+            route your requests internally.
+          </p>
+          <p>
+            <code>anti-distillation</code> &mdash; Checks designed to detect
+            if outputs are being used to train competing models.
+          </p>
+          <p style="margin-top: 20px; font-size: 13px; color: var(--text-muted);">
+            Each of these consumes tokens that may appear on your usage bill
+            without clear attribution.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="divider"></div>
+
+  <!-- Install -->
+  <section class="install" id="install">
+    <div class="container">
+      <div class="install-box">
+        <p class="section-label">Get started</p>
+        <h2>Try it in 10 seconds</h2>
+        <p class="section-desc">
+          No config. No account. Runs entirely on your machine.
+        </p>
+
+        <div class="install-cmds">
+          <div class="install-line">
+            <span class="prompt">$</span> npx agentlens scan
+          </div>
+          <p class="install-or">or install globally</p>
+          <div class="install-line">
+            <span class="prompt">$</span> npm install <span class="flag">-g</span> agentlens
+          </div>
+        </div>
+
+        <a href="https://github.com/katrinalaszlo/agentlens" class="gh-link" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          View on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <div class="divider"></div>
+  <footer>
+    <div class="container">
+      <div class="footer-left">
+        <a href="https://github.com/katrinalaszlo/agentlens">agentlens</a>
+        &nbsp;&middot;&nbsp; MIT License &nbsp;&middot;&nbsp; Built for developers who read the fine print.
+      </div>
+      <div class="footer-right">v0.2.0</div>
+    </div>
+  </footer>
+
+</body>
+</html>
